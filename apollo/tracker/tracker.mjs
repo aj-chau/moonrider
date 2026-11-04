@@ -1,6 +1,8 @@
+const nativeAvailable=location.origin==='http://127.0.0.1:8422';
+const gameOrigin=nativeAvailable?'http://localhost:8423':location.origin;
 import {FilesetResolver, PoseLandmarker} from './assets/vision_bundle.mjs';
 const get = selector => document.querySelector(selector);
-if (location.hash==='#moonrider') {
+if (['#apollo','#moonrider'].includes(location.hash)) {
   const compact=document.createElement('style');
   compact.textContent='main{margin:0;padding:4px}main>small,main>h1,main>p:first-of-type{display:none}select{max-width:52%}button,select{font-size:13px}#status{font-size:12px;margin:5px 0}canvas{max-height:145px;object-fit:contain}';
   document.head.appendChild(compact);
@@ -9,6 +11,10 @@ const video=get('video'), canvas=get('canvas'), ctx=canvas.getContext('2d');
 const camera=get('#camera'), button=get('#toggle'), status=get('#status');
 let model, stream, animation, previousTime, count, since, fps;
 let native;
+let preview=true;
+window.addEventListener('message',event=>{
+  if(['#apollo','#moonrider'].includes(location.hash) && event.source===parent && event.origin===gameOrigin && event.data?.type==='apollo-preview') preview=event.data.visible;
+});
 function stop(message='Camera stopped') {
   cancelAnimationFrame(animation);
   native?.abort(); native=null;
@@ -23,14 +29,16 @@ function draw(now,source=video) {
     if (source!==video || (video.readyState>=2 && video.currentTime!==previousTime)) {
       previousTime=video.currentTime;
       const {width:w,height:h}=canvas;
+      const start=performance.now();
       const pose=model.detectForVideo(source,now).landmarks[0];
-      if (window.parent!==window && location.hash==='#moonrider') {
-        window.parent.postMessage({type:'apollo-pose',pose,aspect:w/h},'http://localhost:8423');
+      const inferenceMs=Math.round(performance.now()-start);
+      if (window.parent!==window && ['#apollo','#moonrider'].includes(location.hash)) {
+        window.parent.postMessage({type:'apollo-pose',pose,aspect:w/h,sentAt:performance.timeOrigin+now},gameOrigin);
       }
-      ctx.save(); ctx.translate(w,0); ctx.scale(-1,1); ctx.drawImage(source,0,0,w,h); ctx.restore();
+      if(preview){ctx.save(); ctx.translate(w,0); ctx.scale(-1,1); ctx.drawImage(source,0,0,w,h); ctx.restore();}
       const xy=p=>[(1-p.x)*w,p.y*h];
       const visible=p=>p && (p.visibility??1)>=0.55;
-      if (pose) {
+      if (preview && pose) {
         ctx.strokeStyle='#64ffca'; ctx.lineWidth=3;
         for (const {start,end} of PoseLandmarker.POSE_CONNECTIONS) {
           if (!visible(pose[start]) || !visible(pose[end])) continue;
@@ -44,8 +52,10 @@ function draw(now,source=video) {
         }
       }
       count++;
-      if (now-since>=1000) {fps=Math.round(count*1000/(now-since)); count=0; since=now;}
-      status.textContent=(pose?'Body detected':'Looking for player')+' · '+(fps??'…')+' FPS';
+      if (now-since>=1000) {
+        fps=Math.round(count*1000/(now-since)); count=0; since=now;
+        status.textContent=(pose?'Body detected':'Looking for player')+' · '+fps+' FPS · pose '+inferenceMs+' ms';
+      }
     }
     if(source===video) animation=requestAnimationFrame(draw);
   } catch(error) {stop(error.message);}
@@ -64,6 +74,23 @@ async function nativeCamera(){
     if(!response.ok) throw Error('Windows could not open the Dell webcam ('+response.status+')');
     const reader=response.body.getReader(), decoder=new TextDecoder();
     let pending=new Uint8Array(0);
+    let newest, processing=false;
+    async function processNewest(){
+      processing=true;
+      try {
+        while(newest && !controller.signal.aborted){
+          const jpeg=newest;
+          newest=null;
+          const bitmap=await createImageBitmap(new Blob([jpeg],{type:'image/jpeg'}));
+          try {
+            if(controller.signal.aborted) return;
+            if(canvas.width!==bitmap.width || canvas.height!==bitmap.height){canvas.width=bitmap.width; canvas.height=bitmap.height;}
+            draw(performance.now(),bitmap);
+          } finally {bitmap.close();}
+        }
+      } catch(error){if(!controller.signal.aborted) stop(error.message);}
+      finally {processing=false;}
+    }
     count=0; since=performance.now(); fps=null;
     while(!controller.signal.aborted){
       const {value,done}=await reader.read();
@@ -82,12 +109,8 @@ async function nativeCamera(){
         latest=pending.subarray(start,start+length); pending=pending.subarray(start+length);
       }
       if(latest){
-        const bitmap=await createImageBitmap(new Blob([latest],{type:'image/jpeg'}));
-        try {
-          if(controller.signal.aborted) return;
-          if(canvas.width!==bitmap.width || canvas.height!==bitmap.height){canvas.width=bitmap.width; canvas.height=bitmap.height;}
-          draw(performance.now(),bitmap);
-        } finally {bitmap.close();}
+        newest=latest;
+        if(!processing) void processNewest();
       }
     }
   } catch(error){if(!controller.signal.aborted) stop(error.message);}
@@ -97,7 +120,7 @@ button.onclick=async()=>{
   button.disabled=true; camera.disabled=true;
   try {
     status.textContent='Opening webcam · allow camera access if prompted';
-    const open=id=>navigator.mediaDevices.getUserMedia({video:{width:{ideal:960},height:{ideal:540},...(id && {deviceId:{exact:id}})},audio:false});
+    const open=id=>navigator.mediaDevices.getUserMedia({video:{width:{ideal:640},height:{ideal:360},frameRate:{ideal:30},...(id && {deviceId:{exact:id}})},audio:false});
     const known=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='videoinput');
     const selected=camera.value || known.find(d=>/DELL.*RGB/i.test(d.label))?.deviceId;
     stream=await open(selected);
@@ -117,10 +140,10 @@ button.onclick=async()=>{
     stream.getVideoTracks()[0].onended=()=>stop('Camera disconnected');
     animation=requestAnimationFrame(draw);
   } catch(error) {
-    if(error.name==='NotAllowedError') {
+    if(nativeAvailable && error.name==='NotAllowedError') {
       stream?.getTracks().forEach(track=>track.stop()); stream=null;
       await nativeCamera();
-    } else stop(error.name+' · '+error.message);
+    } else stop(error.name==='NotAllowedError'?'Camera blocked. Allow camera access in this browser and retry.':error.name+' · '+error.message);
   }
 };
 window.addEventListener('pagehide',()=>stop());

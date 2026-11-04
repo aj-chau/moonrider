@@ -11,7 +11,7 @@ http.createServer(async(req,res)=>{
     if (req.method!=='POST' || req.headers.origin!==origin || 'http://'+req.headers.host!==origin || req.headers['x-apollo-camera']!=='start') {
       res.writeHead(403).end(); return;
     }
-    const capture=spawn(ffmpeg,['-nostdin','-loglevel','error','-f','dshow','-i','video=DELL Monitor RGB Webcam','-vf','fps=20,scale=800:-2','-c:v','mjpeg','-q:v','5','-f','mpjpeg','pipe:1'],{windowsHide:true,stdio:['ignore','pipe','ignore']});
+    const capture=spawn(ffmpeg,['-nostdin','-loglevel','error','-f','dshow','-video_size','640x360','-framerate','30','-vcodec','mjpeg','-i','video=DELL Monitor RGB Webcam','-an','-c:v','copy','-flush_packets','1','-f','mpjpeg','pipe:1'],{windowsHide:true,stdio:['ignore','pipe','ignore']});
     res.setHeader('Content-Type','multipart/x-mixed-replace; boundary=ffmpeg');
     res.setHeader('Cache-Control','no-store');
     capture.stdout.pipe(res,{end:false});
